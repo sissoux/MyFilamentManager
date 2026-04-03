@@ -16,6 +16,7 @@ A comprehensive desktop application for managing 3D printer filament inventory w
 - **Auto-Calculate Remaining Weight**: Automatically calculates remaining filament weight based on actual weight minus spool holder weight
 - **Auto-Set Opened Status**: When selecting a spool to update, status automatically changes to "Opened"
 - **Smart Price Recall**: Remembers the last price paid for specific Brand + Material + Color + Weight combinations
+- **Auto-Save**: Optional checkbox to automatically save the file after any change (add/update/delete/duplicate)
 
 ### 📊 Dynamic Dropdowns
 - **Materials**: PLA, PLA Silk, PETG, TPU, ABS, ASA, Nylon, PETG Carbon, PC
@@ -23,11 +24,13 @@ A comprehensive desktop application for managing 3D printer filament inventory w
 - **Brands**: Prusa, Sunlu, Bambu Lab, Polymaker
 - **Weights**: 1000g (1kg), 250g (mini spools)
 - All dropdowns support custom values
+- **Custom values are automatically saved** to `defaults.json` and persist across sessions
 - Most-used values appear at the top
 
 ### 🏷️ Barcode & Label Generation
 - Automatic barcode generation (Code128 format)
-- Printable labels combining barcode + spool ID
+- **Direct printing to Brother QL-800 label printer** (62mm DK-22205 labels)
+- Printable labels combining barcode + spool ID  
 - Easy scanning for quick inventory updates
 - Barcodes stored in `barcodes/` directory
 - Printable labels stored in `printable_labels/` directory
@@ -45,7 +48,7 @@ A comprehensive desktop application for managing 3D printer filament inventory w
 
 ### Dependencies
 ```bash
-pip install python-barcode pillow pyyaml
+pip install python-barcode pillow pyyaml brother-ql pyusb
 ```
 
 **Required:**
@@ -55,6 +58,8 @@ pip install python-barcode pillow pyyaml
 
 **Optional:**
 - `pyyaml` - YAML file support
+- `brother-ql` - Direct printing to Brother QL label printers
+- `pyusb` - USB communication for Brother QL printers
 
 ## Installation
 
@@ -94,6 +99,17 @@ python FilamentStockManager.py
 2. Update the **Actual Weight** field (weigh the entire spool)
 3. Remaining weight is automatically calculated
 4. Click "Update Spool"
+
+### Printing Labels (Brother QL-800)
+1. Make sure your Brother QL-800 printer is:
+   - Connected via USB
+   - Powered on
+   - Loaded with 62mm continuous labels (DK-22205)
+2. Select a spool from the table
+3. Click "Print Label"
+4. The barcode label will print automatically with auto-cut
+
+**Note:** The print function requires `brother-ql` and `pyusb` packages. If not installed, you'll see an error message with installation instructions.
 
 ### Generating Printable Labels
 Run the label generator script:
@@ -139,8 +155,11 @@ MyFilamentManager/
 ├── README.md                     # This file
 ├── NEW_FEATURES_GUIDE.md        # Detailed features guide
 ├── COMBOBOX_FEATURES.md         # Dropdown features documentation
+├── stock.json                   # Main stock data (auto-loaded at startup)
+├── defaults.json                # Custom materials/colors/brands (auto-saved)
 ├── sample_stock.json            # Sample stock data
 ├── test_stock.json              # Test data
+├── requirements.txt             # Python dependencies
 ├── barcodes/                    # Generated barcodes (PNG)
 ├── printable_labels/            # Printable labels (PNG)
 ├── test_*.py                    # Unit tests
@@ -177,11 +196,19 @@ python test_original_weight.py
 3. Remaining weight auto-calculates
 4. Click "Update Spool" → Done!
 
+### Fast Workflow for Printing Labels
+1. Select spool from table
+2. Click "Print Label"
+3. Label prints automatically on Brother QL-800 → Done!
+
 ### Custom Values
 All dropdown fields accept custom values:
 - Type directly in the combobox field
 - Custom values are saved and appear in future dropdowns
 - Values are sorted by frequency of use
+
+### Auto-Save
+Enable the "Auto-save after changes" checkbox at the bottom of the form to automatically save your stock file after every add, update, delete, or duplicate operation. Your preference is saved and remembered for next time.
 
 ## Keyboard Shortcuts
 

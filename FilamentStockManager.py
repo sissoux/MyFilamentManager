@@ -9,6 +9,7 @@ import json
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import uuid
+import warnings
 
 yaml = importlib.import_module("yaml") if importlib.util.find_spec("yaml") else None
 barcode_lib = importlib.import_module("barcode") if importlib.util.find_spec("barcode") else None
@@ -18,6 +19,26 @@ if barcode_lib:
 		from barcode.writer import ImageWriter
 	except Exception:
 		ImageWriter = None
+
+# Brother QL printer support
+brother_ql_available = False
+try:
+	from PIL import Image as PILImage
+	# Fix for Pillow 10.0+ compatibility with brother_ql
+	# brother_ql uses deprecated ANTIALIAS constant
+	if not hasattr(PILImage, 'ANTIALIAS'):
+		PILImage.ANTIALIAS = PILImage.Resampling.LANCZOS
+	
+	# Suppress deprecation warnings for brother_ql library
+	warnings.filterwarnings("ignore", category=DeprecationWarning, module="brother_ql")
+	warnings.filterwarnings("ignore", message=".*devicedependent.*")
+	
+	from brother_ql.conversion import convert
+	from brother_ql.backends.helpers import send
+	from brother_ql.raster import BrotherQLRaster
+	brother_ql_available = True
+except ImportError:
+	pass
 
 
 @dataclass
@@ -94,17 +115,20 @@ class FilamentStockApp:
 	def __init__(self, root: tk.Tk):
 		self.root = root
 		self.root.title("Filament Stock Manager")
-		self.root.geometry("1280x600")
+		self.root.geometry("1600x750")
 
 		self.spools: list[FilamentSpool] = []
 		self.current_file: Path | None = None
 		self.selected_index: int | None = None
 
-		# Default values for dropdowns
+		# Default values for dropdowns - will be loaded from file or use these as fallback
 		self.default_materials = ["PLA", "PLA Silk", "PETG", "TPU", "ABS", "ASA", "Nylon", "PETG Carbon", "PC"]
 		self.default_colors = ["Black", "White", "Red", "Blue", "Green", "Yellow", "Orange", "Purple", "Gray", "Natural"]
 		self.default_brands = ["Prusa", "Sunlu", "Bambu Lab", "Polymaker"]
 		self.default_weights = ["1000", "250"]  # 1kg and 250g in grams
+		
+		# Load custom defaults from file if exists
+		self._load_defaults()
 
 		self.brand_var = tk.StringVar()
 		self.material_var = tk.StringVar()
@@ -115,14 +139,29 @@ class FilamentStockApp:
 		self.remaining_weight_var = tk.StringVar()
 		self.status_var = tk.StringVar(value="new")
 		self.price_var = tk.StringVar()
-		self.buying_date_var = tk.StringVar()
+		self.buying_date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
 		self.current_id: str | None = None
+		self.auto_save_enabled = tk.BooleanVar(value=False)
 
 		self._build_menu()
 		self._build_layout()
 		
 		# Add trace to auto-calculate remaining weight when actual weight changes
 		self.actual_weight_var.trace_add("write", self._on_actual_weight_changed)
+		
+		# Load default stock.json file if it exists
+		default_file = Path("stock.json")
+		if default_file.exists():
+			try:
+				self._load_from_path(default_file)
+			except Exception:
+				# If loading fails, just set it as the default file for saving
+				self.current_file = default_file
+				self.root.title(f"Filament Stock Manager - {default_file.name}")
+		else:
+			# Set as default file for saving
+			self.current_file = default_file
+			self.root.title(f"Filament Stock Manager - {default_file.name}")
 
 	def _build_menu(self) -> None:
 		menu_bar = tk.Menu(self.root)
@@ -167,7 +206,7 @@ class FilamentStockApp:
 		self.tree.heading("status", text="Status")
 		self.tree.heading("remaining_weight", text="Remaining Weight (g)")
 
-		self.tree.column("id", width=80, anchor=tk.W)
+		self.tree.column("id", width=160, anchor=tk.W)
 		self.tree.column("brand", width=100, anchor=tk.W)
 		self.tree.column("material", width=80, anchor=tk.W)
 		self.tree.column("name", width=120, anchor=tk.W)
@@ -252,13 +291,58 @@ class FilamentStockApp:
 		ttk.Button(button_frame, text="Add", command=self.add_spool).pack(fill=tk.X)
 		ttk.Button(button_frame, text="Update", command=self.update_spool).pack(fill=tk.X, pady=6)
 		ttk.Button(button_frame, text="Delete", command=self.delete_spool).pack(fill=tk.X)
+		ttk.Button(button_frame, text="Duplicate", command=self.duplicate_spool).pack(fill=tk.X, pady=(6, 0))
+		ttk.Button(button_frame, text="Print Label", command=self.print_label).pack(fill=tk.X, pady=(6, 0))
 		ttk.Button(button_frame, text="Clear", command=self.clear_form).pack(fill=tk.X, pady=(6, 0))
+
+		# Auto-save checkbox
+		auto_save_frame = ttk.Frame(form)
+		auto_save_frame.grid(row=11, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+		ttk.Checkbutton(
+			auto_save_frame,
+			text="Auto-save after changes",
+			variable=self.auto_save_enabled,
+			command=self._on_auto_save_changed
+		).pack(anchor=tk.W)
 
 		self._toggle_remaining_field()
 
 	def _add_labeled_entry(self, parent: ttk.Frame, label: str, variable: tk.StringVar, row: int) -> None:
 		ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, pady=4)
 		ttk.Entry(parent, textvariable=variable, width=24).grid(row=row, column=1, sticky=tk.W, pady=4)
+
+	def _load_defaults(self) -> None:
+		"""Load custom default values from defaults.json file."""
+		defaults_file = Path("defaults.json")
+		if defaults_file.exists():
+			try:
+				with defaults_file.open("r", encoding="utf-8") as f:
+					data = json.load(f)
+					if "materials" in data and isinstance(data["materials"], list):
+						self.default_materials = data["materials"]
+					if "colors" in data and isinstance(data["colors"], list):
+						self.default_colors = data["colors"]
+					if "brands" in data and isinstance(data["brands"], list):
+						self.default_brands = data["brands"]
+					if "auto_save" in data and isinstance(data["auto_save"], bool):
+						self.auto_save_enabled.set(data["auto_save"])
+			except Exception as e:
+				print(f"Warning: Could not load defaults from file: {e}")
+
+	def _save_defaults(self) -> None:
+		"""Save custom default values to defaults.json file."""
+		defaults_file = Path("defaults.json")
+		try:
+			data = {
+				"materials": self.default_materials,
+				"colors": self.default_colors,
+				"brands": self.default_brands,
+				"auto_save": self.auto_save_enabled.get()
+			}
+			with defaults_file.open("w", encoding="utf-8") as f:
+				json.dump(data, f, indent=2)
+		except Exception as e:
+			print(f"Warning: Could not save defaults to file: {e}")
 
 	def _get_sorted_values_by_occurrence(self, field_name: str, defaults: list[str]) -> list[str]:
 		"""Get sorted list of values by occurrence in stock, with defaults at the end if not present."""
@@ -288,17 +372,39 @@ class FilamentStockApp:
 
 	def _update_combobox_values(self) -> None:
 		"""Update combobox dropdown values based on current stock and defaults."""
+		# Track if we need to save defaults
+		defaults_updated = False
+		
 		# Update brand combobox
 		brand_values = self._get_sorted_values_by_occurrence("brand", self.default_brands)
 		self.brand_combo['values'] = brand_values
+		# Check if any new custom brands were added
+		for brand in brand_values:
+			if brand and brand not in self.default_brands:
+				self.default_brands.append(brand)
+				defaults_updated = True
 
 		# Update material combobox
 		material_values = self._get_sorted_values_by_occurrence("material", self.default_materials)
 		self.material_combo['values'] = material_values
+		# Check if any new custom materials were added
+		for material in material_values:
+			if material and material not in self.default_materials:
+				self.default_materials.append(material)
+				defaults_updated = True
 
 		# Update color combobox
 		color_values = self._get_sorted_values_by_occurrence("color", self.default_colors)
 		self.color_combo['values'] = color_values
+		# Check if any new custom colors were added
+		for color in color_values:
+			if color and color not in self.default_colors:
+				self.default_colors.append(color)
+				defaults_updated = True
+		
+		# Save defaults if any new custom values were added
+		if defaults_updated:
+			self._save_defaults()
 
 	def _prefill_dropdowns(self) -> None:
 		"""Prefill dropdown menus with first values from their lists."""
@@ -352,6 +458,15 @@ class FilamentStockApp:
 		else:
 			self.remaining_weight_var.set("")
 			self.remaining_entry.configure(state="disabled")
+
+	def _on_auto_save_changed(self) -> None:
+		"""Called when auto-save checkbox is toggled."""
+		self._save_defaults()
+
+	def _auto_save(self) -> None:
+		"""Automatically save the file if auto-save is enabled."""
+		if self.auto_save_enabled.get() and self.current_file:
+			self._save_to_path(self.current_file)
 
 	def _on_actual_weight_changed(self, *args) -> None:
 		"""Auto-calculate remaining weight when actual weight changes for opened spools."""
@@ -504,14 +619,12 @@ class FilamentStockApp:
 		# Calculate spool holder weight
 		spool_holder_weight = 0.0
 		if self.current_id:
-			# Editing existing spool - preserve or recalculate
+			# Editing existing spool - preserve original_weight and spool_holder_weight
 			existing_spool = self.spools[self.selected_index] if self.selected_index is not None else None
 			if existing_spool:
+				# Original weight should NEVER change - it's the manufacturer's specification
+				original_weight = existing_spool.original_weight
 				spool_holder_weight = existing_spool.spool_holder_weight
-				# If updating with remaining weight, recalculate original_weight
-				if is_opened and remaining_weight is not None and actual_weight > 0:
-					# original_weight = actual_weight - spool_holder_weight
-					original_weight = actual_weight - spool_holder_weight
 		else:
 			# New spool - calculate from actual and original/remaining
 			if actual_weight > 0:
@@ -556,13 +669,12 @@ class FilamentStockApp:
 			remaining_text = (
 				f"{spool.remaining_weight:.1f}" if spool.remaining_weight is not None else "-"
 			)
-			short_id = spool.id[:8] if len(spool.id) > 8 else spool.id
 			self.tree.insert(
 				"",
 				tk.END,
 				iid=str(index),
 				values=(
-					short_id,
+					spool.id,
 					spool.brand,
 					spool.material,
 					spool.name,
@@ -576,6 +688,10 @@ class FilamentStockApp:
 			)
 
 	def add_spool(self) -> None:
+		# Clear current_id to ensure a new ID is generated (not reusing selected spool's ID)
+		self.current_id = None
+		self.selected_index = None
+		
 		spool = self._read_form()
 		if spool is None:
 			return
@@ -587,6 +703,7 @@ class FilamentStockApp:
 		self._update_combobox_values()
 		self._render_tree()
 		self.clear_form()
+		self._auto_save()
 
 	def update_spool(self) -> None:
 		if self.selected_index is None:
@@ -604,6 +721,7 @@ class FilamentStockApp:
 		self._update_combobox_values()
 		self._render_tree()
 		self.tree.selection_set(str(self.selected_index))
+		self._auto_save()
 
 	def delete_spool(self) -> None:
 		if self.selected_index is None:
@@ -614,6 +732,287 @@ class FilamentStockApp:
 		self._update_combobox_values()
 		self._render_tree()
 		self.clear_form()
+		self._auto_save()
+
+	def duplicate_spool(self) -> None:
+		"""Duplicate the selected spool with a new ID, color, name and actual weight."""
+		if self.selected_index is None:
+			messagebox.showinfo("No selection", "Please select a spool to duplicate.")
+			return
+
+		original_spool = self.spools[self.selected_index]
+		
+		# Create dialog to prompt for color, name, and actual weight
+		dialog = tk.Toplevel(self.root)
+		dialog.title("Duplicate Spool")
+		dialog.transient(self.root)
+		dialog.grab_set()
+		dialog.geometry("450x280")
+		dialog.resizable(False, False)
+		
+		# Center on parent
+		dialog.update_idletasks()
+		x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+		y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+		dialog.geometry(f"+{x}+{y}")
+		
+		# Content
+		frame = ttk.Frame(dialog, padding=20)
+		frame.pack(fill=tk.BOTH, expand=True)
+		
+		ttk.Label(frame, text=f"Duplicating: {original_spool.id}", font=("TkDefaultFont", 10, "bold")).pack(pady=(0, 10))
+		ttk.Label(frame, text=f"{original_spool.brand} - {original_spool.material}").pack(pady=(0, 15))
+		
+		# Color input (combobox with same values as main form)
+		color_frame = ttk.Frame(frame)
+		color_frame.pack(fill=tk.X, pady=5)
+		ttk.Label(color_frame, text="Color:", width=20).pack(side=tk.LEFT)
+		color_var = tk.StringVar(value=original_spool.color)
+		color_combo = ttk.Combobox(color_frame, textvariable=color_var, width=22)
+		color_values = self._get_sorted_values_by_occurrence("color", self.default_colors)
+		color_combo['values'] = color_values
+		color_combo.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+		color_combo.focus_set()
+		
+		# Name input
+		name_frame = ttk.Frame(frame)
+		name_frame.pack(fill=tk.X, pady=5)
+		ttk.Label(name_frame, text="Name:", width=20).pack(side=tk.LEFT)
+		name_var = tk.StringVar(value=original_spool.name)
+		name_entry = ttk.Entry(name_frame, textvariable=name_var, width=25)
+		name_entry.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+		
+		# Actual weight input
+		weight_frame = ttk.Frame(frame)
+		weight_frame.pack(fill=tk.X, pady=5)
+		ttk.Label(weight_frame, text="Actual weight (g):", width=20).pack(side=tk.LEFT)
+		actual_weight_var = tk.StringVar()
+		actual_weight_entry = ttk.Entry(weight_frame, textvariable=actual_weight_var, width=25)
+		actual_weight_entry.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+		
+		result = {"ok": False, "color": "", "name": "", "actual_weight": 0.0}
+		
+		def on_ok():
+			try:
+				color = color_var.get().strip()
+				name = name_var.get().strip()
+				actual_weight = float(actual_weight_var.get().strip())
+				
+				if not color:
+					messagebox.showerror("Invalid Input", "Color cannot be empty.", parent=dialog)
+					return
+				if not name:
+					messagebox.showerror("Invalid Input", "Name cannot be empty.", parent=dialog)
+					return
+				if actual_weight <= 0:
+					messagebox.showerror("Invalid Weight", "Actual weight must be greater than zero.", parent=dialog)
+					return
+				
+				result["ok"] = True
+				result["color"] = color
+				result["name"] = name
+				result["actual_weight"] = actual_weight
+				dialog.destroy()
+			except ValueError:
+				messagebox.showerror("Invalid Weight", "Please enter a valid number for actual weight.", parent=dialog)
+		
+		def on_cancel():
+			dialog.destroy()
+		
+		# Buttons
+		button_frame = ttk.Frame(frame)
+		button_frame.pack(pady=(15, 0))
+		ttk.Button(button_frame, text="OK", command=on_ok, width=10).pack(side=tk.LEFT, padx=5)
+		ttk.Button(button_frame, text="Cancel", command=on_cancel, width=10).pack(side=tk.LEFT, padx=5)
+		
+		# Bind Enter key
+		dialog.bind("<Return>", lambda e: on_ok())
+		dialog.bind("<Escape>", lambda e: on_cancel())
+		
+		# Wait for dialog
+		dialog.wait_window()
+		
+		if not result["ok"]:
+			return
+		
+		# Create new spool with unique ID using new color
+		new_color = result["color"]
+		new_name = result["name"]
+		new_id = self._generate_human_readable_id(original_spool.material, new_color)
+		actual_weight = result["actual_weight"]
+		
+		# Calculate spool holder weight from original weight
+		spool_holder_weight = actual_weight - original_spool.original_weight
+		if spool_holder_weight < 0:
+			messagebox.showerror("Invalid Weight", 
+				f"Actual weight ({actual_weight}g) cannot be less than original weight ({original_spool.original_weight}g).")
+			return
+		
+		# Create new spool
+		new_spool = FilamentSpool(
+			id=new_id,
+			brand=original_spool.brand,
+			material=original_spool.material,
+			name=new_name,
+			color=new_color,
+			original_weight=original_spool.original_weight,
+			is_opened=False,  # Set to New
+			remaining_weight=original_spool.original_weight,  # Full spool
+			price=original_spool.price,
+			buying_date=datetime.now().strftime("%Y-%m-%d"),  # Today's date
+			created_at=datetime.now().isoformat(),
+			updated_at=datetime.now().isoformat(),
+			barcode=new_id,
+			actual_weight=actual_weight,
+			spool_holder_weight=spool_holder_weight
+		)
+		
+		self.spools.append(new_spool)
+		self._generate_barcode(new_spool)
+		self._update_combobox_values()
+		self._render_tree()
+		self._auto_save()
+		
+		messagebox.showinfo("Success", f"Spool duplicated with ID: {new_id}")
+		self.clear_form()
+
+	def print_label(self) -> None:
+		"""Print barcode label on Brother QL-800 printer with 62mm label."""
+		# Suppress only brother_ql deprecation warnings during printing
+		with warnings.catch_warnings():
+			warnings.filterwarnings("ignore", category=DeprecationWarning, module="brother_ql")
+			self._print_label_internal()
+	
+	def _print_label_internal(self) -> None:
+		"""Internal method for printing label with warnings suppressed."""
+		if not brother_ql_available:
+			self._show_error_with_copy(
+				"Brother QL Not Available",
+				"Brother QL library is not installed.\n\nInstall it with:\npip install brother-ql"
+			)
+			return
+
+		if self.selected_index is None:
+			messagebox.showwarning("No selection", "Please select a spool to print.")
+			return
+
+		spool = self.spools[self.selected_index]
+		
+		# Get barcode file path
+		if self.current_file:
+			base_dir = self.current_file.parent
+		else:
+			base_dir = Path.cwd()
+		
+		barcode_path = base_dir / "barcodes" / f"{spool.id}.png"
+		
+		if not barcode_path.exists():
+			self._show_error_with_copy(
+				"Barcode Not Found",
+				f"Barcode file not found: {barcode_path}\n\nThe barcode may not have been generated yet."
+			)
+			return
+
+		try:
+			# Load the barcode image
+			image = PILImage.open(barcode_path)
+			
+			# Brother QL-800 with 62mm continuous label (DK-22205)
+			printer_model = "QL-800"
+			label_type = "62"  # 62mm continuous label
+			
+			# Create raster data
+			qlr = BrotherQLRaster(printer_model)
+			qlr.exception_on_warning = True
+			
+			# Convert image to Brother QL format
+			instructions = convert(
+				qlr=qlr,
+				images=[image],
+				label=label_type,
+				rotate="0",  # No rotation
+				threshold=70.0,
+				dither=False,
+				compress=False,
+				red=False,
+				cut=True  # Auto-cut after printing
+			)
+			
+			# Send to printer via USB
+			# Note: pyusb sometimes throws spurious "usb_reap_async" error on Windows even when printing succeeds
+			try:
+				send(
+					instructions=instructions,
+					printer_identifier="usb://0x04f9:0x209b",  # QL-800 USB identifier
+					backend_identifier="pyusb",
+					blocking=True
+				)
+			except OSError as usb_error:
+				# Check if it's the specific spurious "usb_reap_async" error
+				error_msg = str(usb_error).lower()
+				if "usb_reap_async" in error_msg and "errno" in error_msg:
+					# This is a known spurious error on Windows - label actually printed successfully
+					pass
+				else:
+					# Real USB error, re-raise it
+					raise
+			
+		except FileNotFoundError as e:
+			self._show_error_with_copy(
+				"Printer Not Found",
+				f"Could not find Brother QL-800 printer.\n\nMake sure the printer is connected via USB and powered on.\n\nError: {e}"
+			)
+		except Exception as e:
+			self._show_error_with_copy(
+				"Print Error",
+				f"Failed to print label: {e}\n\nMake sure:\n- Brother QL-800 is connected via USB\n- Printer is powered on\n- 62mm label (DK-22205) is installed"
+			)
+
+	def _show_error_with_copy(self, title: str, message: str) -> None:
+		"""Show error dialog with a 'Copy to Clipboard' button."""
+		dialog = tk.Toplevel(self.root)
+		dialog.title(title)
+		dialog.transient(self.root)
+		dialog.grab_set()
+		
+		# Center dialog on parent
+		dialog.geometry("500x250")
+		dialog.resizable(False, False)
+		
+		# Message
+		text_frame = ttk.Frame(dialog, padding=10)
+		text_frame.pack(fill=tk.BOTH, expand=True)
+		
+		text_widget = tk.Text(text_frame, wrap=tk.WORD, height=10, width=60)
+		text_widget.insert("1.0", message)
+		text_widget.config(state=tk.DISABLED)
+		text_widget.pack(fill=tk.BOTH, expand=True)
+		
+		# Buttons
+		button_frame = ttk.Frame(dialog, padding=10)
+		button_frame.pack(fill=tk.X)
+		
+		def copy_to_clipboard():
+			self.root.clipboard_clear()
+			self.root.clipboard_append(f"{title}\n\n{message}")
+			self.root.update()
+			# Brief visual feedback
+			copy_btn.config(text="Copied!")
+			dialog.after(1000, lambda: copy_btn.config(text="Copy to Clipboard"))
+		
+		copy_btn = ttk.Button(button_frame, text="Copy to Clipboard", command=copy_to_clipboard)
+		copy_btn.pack(side=tk.LEFT, padx=5)
+		
+		ok_btn = ttk.Button(button_frame, text="OK", command=dialog.destroy)
+		ok_btn.pack(side=tk.RIGHT, padx=5)
+		
+		# Make OK button default
+		dialog.bind("<Return>", lambda e: dialog.destroy())
+		dialog.bind("<Escape>", lambda e: dialog.destroy())
+		ok_btn.focus_set()
+		
+		# Wait for dialog to close
+		dialog.wait_window()
 
 	def clear_form(self) -> None:
 		self.brand_var.set("")
@@ -630,6 +1029,8 @@ class FilamentStockApp:
 		self.selected_index = None
 		self.current_id = None
 		self.tree.selection_remove(*self.tree.selection())
+		# Re-enable original weight field for new spools
+		self.weight_combo.configure(state="normal")
 		self._toggle_remaining_field()
 		self._prefill_dropdowns()  # Refill with defaults
 
@@ -651,6 +1052,8 @@ class FilamentStockApp:
 		self.name_var.set(spool.name)
 		self.color_var.set(spool.color)
 		self.original_weight_var.set(str(spool.original_weight))
+		# Disable original weight field when editing - it should never change
+		self.weight_combo.configure(state="disabled")
 		self.actual_weight_var.set(str(spool.actual_weight) if spool.actual_weight else "")
 		# Auto-set to "opened" when selecting for update
 		self.status_var.set("opened")
