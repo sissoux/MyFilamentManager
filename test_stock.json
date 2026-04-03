@@ -1,0 +1,32 @@
+[
+  {
+    "id": "abc123-test-id-001",
+    "brand": "Prusament",
+    "material": "PLA",
+    "name": "Galaxy Black",
+    "color": "Black",
+    "estimated_weight": 1000,
+    "is_opened": false,
+    "remaining_weight": null,
+    "price": 24.99,
+    "buying_date": "2026-03-15",
+    "created_at": "2026-03-15T10:30:00",
+    "updated_at": "2026-03-15T10:30:00",
+    "barcode": "abc123-test-id-001"
+  },
+  {
+    "id": "def456-test-id-002",
+    "brand": "eSUN",
+    "material": "PETG",
+    "name": "Translucent Blue",
+    "color": "Blue",
+    "estimated_weight": 1000,
+    "is_opened": true,
+    "remaining_weight": 450,
+    "price": 19.99,
+    "buying_date": "2026-02-20",
+    "created_at": "2026-02-20T14:15:00",
+    "updated_at": "2026-04-01T09:00:00",
+    "barcode": "def456-test-id-002"
+  }
+]
